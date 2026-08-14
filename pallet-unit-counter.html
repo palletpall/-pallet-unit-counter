@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#2563eb">
+  <title>Pallet Unit Counter</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+
+  <style>
+    body { -webkit-tap-highlight-color: transparent; }
+    #reader video { width: 100% !important; border-radius: 1rem; }
+    #reader { border: 0 !important; }
+    #reader__scan_region { min-height: 280px; }
+    #reader__dashboard_section_csr button {
+      background: #2563eb !important;
+      color: white !important;
+      border-radius: 0.75rem !important;
+      padding: 0.7rem 1rem !important;
+      border: 0 !important;
+      font-weight: 700 !important;
+    }
+    #reader__dashboard_section_csr select {
+      border-radius: 0.5rem !important;
+      padding: 0.5rem !important;
+    }
+  </style>
+</head>
+
+<body class="bg-gray-100 min-h-screen text-gray-900">
+  <main class="min-h-screen max-w-lg mx-auto bg-gray-100 flex flex-col">
+
+    <!-- Total -->
+    <header class="bg-blue-600 text-white px-5 pt-8 pb-7 text-center shadow-lg">
+      <div class="text-sm font-bold uppercase tracking-widest opacity-80">
+        Total Units
+      </div>
+      <div id="grand-total" class="text-6xl font-black leading-tight my-1">0</div>
+      <div id="pallet-count" class="text-sm opacity-85">
+        Pallets scanned: 0
+      </div>
+    </header>
+
+    <!-- Scanner -->
+    <section class="flex-1 p-4">
+      <div class="bg-white rounded-3xl shadow-md p-3">
+        <div id="reader" class="w-full overflow-hidden rounded-2xl"></div>
+      </div>
+
+      <div id="feedback"
+           class="mt-4 p-4 rounded-2xl text-center font-semibold bg-gray-200 text-gray-700">
+        Ready to scan your first pallet.
+      </div>
+
+      <div class="mt-3 bg-white rounded-2xl p-4 shadow-sm text-center">
+        <div class="text-xs uppercase tracking-wider text-gray-500 font-bold">
+          Last pallet
+        </div>
+        <div id="last-scan" class="text-2xl font-black mt-1">—</div>
+      </div>
+    </section>
+
+    <!-- Controls -->
+    <footer class="sticky bottom-0 bg-white border-t border-gray-200 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl">
+      <div class="flex gap-3 max-w-lg mx-auto">
+        <button id="pause-btn"
+          class="flex-1 bg-yellow-500 active:bg-yellow-600 text-white font-bold py-4 px-4 rounded-2xl">
+          Pause
+        </button>
+
+        <button id="undo-btn"
+          class="bg-gray-700 active:bg-gray-800 text-white font-bold py-4 px-5 rounded-2xl">
+          Undo
+        </button>
+
+        <button id="reset-btn"
+          class="bg-red-500 active:bg-red-600 text-white font-bold py-4 px-5 rounded-2xl">
+          Reset
+        </button>
+      </div>
+    </footer>
+  </main>
+
+  <script>
+    const STORAGE_KEY = "palletUnitCounter_v1";
+
+    let totalUnits = 0;
+    let totalPallets = 0;
+    let isPaused = false;
+    let lastScannedCode = "";
+    let lastScanTime = 0;
+    let history = [];
+
+    const grandTotalEl = document.getElementById("grand-total");
+    const palletCountEl = document.getElementById("pallet-count");
+    const feedbackEl = document.getElementById("feedback");
+    const lastScanEl = document.getElementById("last-scan");
+    const pauseBtn = document.getElementById("pause-btn");
+    const undoBtn = document.getElementById("undo-btn");
+    const resetBtn = document.getElementById("reset-btn");
+
+    function saveState() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        totalUnits,
+        totalPallets,
+        history,
+        lastScannedCode,
+        lastScanTime
+      }));
+    }
+
+    function loadState() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+        if (!saved) return;
+
+        totalUnits = Number(saved.totalUnits) || 0;
+        totalPallets = Number(saved.totalPallets) || 0;
+        history = Array.isArray(saved.history) ? saved.history : [];
+        lastScannedCode = saved.lastScannedCode || "";
+        lastScanTime = Number(saved.lastScanTime) || 0;
+
+        updateDisplay();
+
+        if (totalPallets > 0) {
+          const last = history[history.length - 1];
+          if (last) lastScanEl.textContent = `+${last.units.toLocaleString()} units`;
+          setFeedback(
+            `Saved count restored: ${totalUnits.toLocaleString()} total units.`,
+            "info"
+          );
+        }
+      } catch (e) {
+        console.warn("Could not restore saved count.", e);
+      }
+    }
+
+    function updateDisplay() {
+      grandTotalEl.textContent = totalUnits.toLocaleString();
+      palletCountEl.textContent = `Pallets scanned: ${totalPallets}`;
+    }
+
+    function setFeedback(message, type) {
+      const styles = {
+        success: "bg-green-100 text-green-800",
+        error: "bg-red-100 text-red-800",
+        info: "bg-blue-100 text-blue-800",
+        neutral: "bg-gray-200 text-gray-700"
+      };
+
+      feedbackEl.className =
+        `mt-4 p-4 rounded-2xl text-center font-semibold ${styles[type] || styles.neutral}`;
+      feedbackEl.textContent = message;
+    }
+
+    // Short confirmation beep.
+    let audioCtx = null;
+
+    function playBeep() {
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === "suspended") audioCtx.resume();
+
+        const oscillator = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        oscillator.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        oscillator.frequency.value = 900;
+        gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+
+        oscillator.start();
+        oscillator.stop(audioCtx.currentTime + 0.12);
+      } catch (e) {
+        // Audio is optional; scanning still works.
+      }
+    }
+
+    function addPallet(decodedText) {
+      if (isPaused) return;
+
+      const now = Date.now();
+
+      // Prevent the same QR code from being counted repeatedly while
+      // it remains in the camera view.
+      if (
+        decodedText === lastScannedCode &&
+        now - lastScanTime < 3000
+      ) {
+        return;
+      }
+
+      // QR code should contain a unit count, e.g. "480" or "QTY: 480".
+      const numberMatch = String(decodedText).match(/\d[\d,]*/);
+
+      if (!numberMatch) {
+        setFeedback(
+          `No unit count found in QR code: "${decodedText}"`,
+          "error"
+        );
+        return;
+      }
+
+      const units = parseInt(numberMatch[0].replace(/,/g, ""), 10);
+
+      if (!Number.isFinite(units) || units <= 0) {
+        setFeedback("The QR code did not contain a valid positive unit count.", "error");
+        return;
+      }
+
+      history.push({
+        units,
+        code: decodedText,
+        time: now
+      });
+
+      totalUnits += units;
+      totalPallets += 1;
+      lastScannedCode = decodedText;
+      lastScanTime = now;
+
+      updateDisplay();
+      lastScanEl.textContent = `+${units.toLocaleString()} units`;
+      setFeedback(
+        `Added ${units.toLocaleString()} units. Total is now ${totalUnits.toLocaleString()}.`,
+        "success"
+      );
+
+      playBeep();
+      saveState();
+    }
+
+    function undoLast() {
+      if (history.length === 0) {
+        setFeedback("There is nothing to undo.", "neutral");
+        return;
+      }
+
+      const last = history.pop();
+      totalUnits = Math.max(0, totalUnits - last.units);
+      totalPallets = Math.max(0, totalPallets - 1);
+
+      lastScannedCode = "";
+      lastScanTime = 0;
+
+      updateDisplay();
+
+      const previous = history[history.length - 1];
+      lastScanEl.textContent = previous
+        ? `+${previous.units.toLocaleString()} units`
+        : "—";
+
+      setFeedback(
+        `Removed ${last.units.toLocaleString()} units. Total is now ${totalUnits.toLocaleString()}.`,
+        "info"
+      );
+
+      saveState();
+    }
+
+    function resetCounter() {
+      if (!confirm("Reset the total units and start a new count?")) return;
+
+      totalUnits = 0;
+      totalPallets = 0;
+      history = [];
+      lastScannedCode = "";
+      lastScanTime = 0;
+
+      updateDisplay();
+      lastScanEl.textContent = "—";
+      setFeedback("Count reset. Ready for the first pallet.", "neutral");
+      saveState();
+    }
+
+    pauseBtn.addEventListener("click", () => {
+      isPaused = !isPaused;
+
+      if (isPaused) {
+        pauseBtn.textContent = "Resume";
+        pauseBtn.className =
+          "flex-1 bg-green-500 active:bg-green-600 text-white font-bold py-4 px-4 rounded-2xl";
+        setFeedback("Scanning paused.", "info");
+      } else {
+        pauseBtn.textContent = "Pause";
+        pauseBtn.className =
+          "flex-1 bg-yellow-500 active:bg-yellow-600 text-white font-bold py-4 px-4 rounded-2xl";
+        setFeedback("Scanning resumed. Ready for the next pallet.", "neutral");
+      }
+    });
+
+    undoBtn.addEventListener("click", undoLast);
+    resetBtn.addEventListener("click", resetCounter);
+
+    loadState();
+
+    // QR-only scanning.
+    const scanner = new Html5QrcodeScanner(
+      "reader",
+      {
+        fps: 10,
+        qrbox: { width: 250, height: 250 },
+        rememberLastUsedCamera: true,
+        formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE]
+      },
+      false
+    );
+
+    scanner.render(
+      (decodedText) => addPallet(decodedText),
+      () => {
+        // Ignore normal "QR not found yet" scanner messages.
+      }
+    );
+  </script>
+</body>
+</html>
